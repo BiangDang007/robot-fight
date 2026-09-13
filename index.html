@@ -481,8 +481,13 @@ function host(code) {
 }
 function guest(code) {
   NET.p = 2; NET.code = code; const p = mkPeer();
-  p.on('open', () => { const c = p.connect(PEER_NS + code, { serialization: 'json' }); c.on('open', () => { NET.conn = c; NET.ready = true; });
-    c.on('data', d => { NET.state = d; NET.stateAt = performance.now(); }); c.on('close', () => { NET.conn = null; NET.err = '對手斷線'; }); });
+  const dial = () => {                                     // 8 秒沒接通就重撥（信令 / ICE 偶爾第一次會卡住）
+    const c = p.connect(PEER_NS + code, { serialization: 'json' }); NET.tries = (NET.tries || 0) + 1;
+    c.on('open', () => { NET.conn = c; NET.ready = true; NET.err = ''; });
+    c.on('data', d => { NET.state = d; NET.stateAt = performance.now(); }); c.on('close', () => { if (NET.conn === c) { NET.conn = null; NET.err = '對手斷線'; } });
+    setTimeout(() => { if (!c.open && !p.destroyed) { c.close(); dial(); } }, 8000);
+  };
+  p.on('open', dial);
 }
 let lastPub = 0;
 function send(obj) {                                       // 30 Hz 節流；P2 的一次型 input（拳/踢/跳）用 OR 累積，不會因為跳過的 frame 掉招
@@ -504,7 +509,7 @@ function netStatus(now) {
   if (!NET.p) return SRC === 'ai' ? 'ROBOT FIGHT · 電腦互打' : 'ROBOT FIGHT';
   const err = NET.err ? ` · ${NET.err}` : '';
   if (NET.p === 1) return `房號 ${NET.code} · ${now - NET.remoteAt < 1000 ? '對手已連線' : NET.ready ? '等對手輸入房號… 先由電腦代打' : '連線中…'}${err}`;
-  return `房號 ${NET.code} · ${now - NET.stateAt < 1000 ? '已連線（你是 P2 綠）' : '連線中…'}${err}`;
+  return `房號 ${NET.code} · ${now - NET.stateAt < 1000 ? '已連線（你是 P2 綠）' : `連線中…${NET.tries > 1 ? `（第 ${NET.tries} 次）` : ''}`}${err}`;
 }
 function goOnline() {                                      // 開房 or 加入；?room=XXXX 指定房號、?join=XXXX 直接加入
   const j = ($('code').value || Q.get('join') || '').trim().toUpperCase();
@@ -554,9 +559,12 @@ function frame(now) {
   $('b1').lastElementChild.textContent = `P1  ${P1.hp}`; $('b2').lastElementChild.textContent = `${P2.hp}  P2`;
   renderer.render(scene, camera);
 }
-// 分頁被切到背景時 rAF 會停，主機一停對手畫面就凍住 → 背景改用 setTimeout 30 Hz 撐著
-function tick(now) { frame(now); if (document.hidden) setTimeout(() => tick(performance.now()), 33); else requestAnimationFrame(tick); }
-requestAnimationFrame(tick);
+// 分頁在背景時 rAF 完全不跑（連第一次都不會），主機一停對手畫面就凍住 → 背景改用 setTimeout 30 Hz；
+// 可見性一變就換一代重新起跑，舊的那條鏈（卡在 rAF 或 timeout 裡的）看到代數不對就自己結束
+let loopGen = 0;
+function tick(now, gen) { if (gen !== loopGen) return; frame(now); if (document.hidden) setTimeout(() => tick(performance.now(), gen), 33); else requestAnimationFrame(t => tick(t, gen)); }
+function startLoop() { loopGen++; tick(performance.now(), loopGen); }
+document.addEventListener('visibilitychange', startLoop); startLoop();
 Object.assign(window, { __P1: P1, __P2: P2, __hit: hitFighter, __ATTACKS: ATTACKS, __setHands: h => { hands = assign(h); }, __setSrc: setSrc, __NET: NET, __decide: decide, __handInfo: handInfo, __playerHands: playerHands });   // 除錯 / 驗證用（__setHands：沒相機時塞假手）
 
 // ---- 自我檢查：命中幾何 + 防禦減傷 ----

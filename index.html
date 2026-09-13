@@ -1,0 +1,586 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<title>Robot Fight 2P</title>
+<style>
+  html,body{margin:0;height:100%;background:#15151c;overflow:hidden;font-family:ui-monospace,Menlo,monospace;color:#eee}
+  canvas{position:fixed;inset:0;width:100vw;height:100vh;display:block}
+  #hud{position:fixed;inset:0;pointer-events:none}
+  .bar{position:absolute;top:22px;width:38vw;height:22px;border:2px solid #ddd;border-radius:6px;background:rgba(0,0,0,.55);overflow:hidden}
+  .bar i{display:block;height:100%;transform-origin:left;transition:transform .12s}
+  .bar b{position:absolute;inset:0;font-size:12px;line-height:22px;padding:0 8px;font-weight:normal}
+  #b1{left:24px}#b1 i{background:#d8262b}#b1 b{text-align:left}
+  #b2{right:24px}#b2 i{background:#2e9e5b;transform-origin:right}#b2 b{text-align:right}
+  #mid{position:absolute;top:14px;left:50%;transform:translateX(-50%);font-size:14px;opacity:.7}
+  #msg{position:absolute;top:34%;left:0;right:0;text-align:center;font-size:72px;font-weight:bold;text-shadow:0 4px 24px #000;opacity:0;transition:opacity .2s}
+  #keys{position:absolute;bottom:18px;left:24px;right:24px;display:flex;justify-content:space-between;font-size:12px;line-height:1.7;white-space:pre;opacity:.85}
+  #keys div,#help{padding:10px 14px;border:2px solid #ddd;border-radius:8px;background:rgba(0,0,0,.55)}
+  #help{position:absolute;bottom:18px;left:50%;transform:translateX(-50%);font-size:12px;line-height:1.7;white-space:pre;text-align:center}
+  #help b{color:#f5c531;font-weight:normal}
+  #start{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;background:rgba(21,21,28,.82);text-align:center;line-height:1.8}
+  #start h1{margin:0;font-size:56px;letter-spacing:.08em}
+  #start p{margin:0;opacity:.85;white-space:pre}
+  #start button{font:inherit;font-size:20px;padding:12px 40px;border:2px solid #f5c531;border-radius:8px;background:#f5c531;color:#15151c;cursor:pointer}
+  #start button:hover{background:#ffd75a}
+  #start button.alt{background:transparent;color:#f5c531;font-size:16px;padding:8px 20px}
+  #start input{font:inherit;font-size:20px;width:5.2em;text-align:center;letter-spacing:.2em;text-transform:uppercase;padding:6px 8px;border:2px solid #ddd;border-radius:8px;background:rgba(0,0,0,.4);color:#eee}
+  #arrow{position:fixed;left:50%;bottom:84px;width:44px;height:44px;margin-left:-22px;display:none;align-items:center;justify-content:center;font-size:34px;color:#4ee08a;text-shadow:0 0 10px #000;pointer-events:none}
+  #cam,#ov{position:fixed;top:56px;right:24px;width:280px;aspect-ratio:16/9;transform:scaleX(-1);border-radius:8px;display:none}
+  #cam{object-fit:cover;border:2px solid #ddd;background:#000}
+  #ov{pointer-events:none}
+  [hidden]{display:none!important}
+  #hands{position:fixed;top:226px;right:24px;width:280px;box-sizing:border-box;padding:8px 10px;border:2px solid #ddd;border-radius:8px;background:rgba(0,0,0,.55);font-size:11px;line-height:1.6;white-space:pre-wrap}
+</style>
+<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js"}}</script>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<div id="hud">
+  <div class="bar" id="b1"><i></i><b>P1</b></div><div class="bar" id="b2"><i></i><b>P2</b></div>
+  <div id="mid">ROBOT FIGHT</div><div id="msg"></div>
+  <div id="keys" hidden><div id="k1"></div><div id="k2"></div></div>
+  <div id="help"></div>
+</div>
+<video id="cam" playsinline muted></video><canvas id="ov"></canvas>
+<div id="hands" hidden></div>
+<div id="start"><h1>ROBOT FIGHT</h1>
+<p>兩人對戰 · 各用自己的電腦和相機，兩隻手控制一隻機器人
+<b style="color:#f5c531">右手</b>管移動：踏步走 · 快踏跑 · 掌傾轉身 · 握拳退 · 抽高跳　　<b style="color:#f5c531">左手</b>管攻擊：握拳直拳 · 彈指踢 · 抽高上勾 · 張手防</p>
+<button id="go">開房 · 我是 <span style="color:#a00">P1</span>（會要求相機）</button>
+<p>對手開了房？輸入他的房號：<input id="code" maxlength="4" placeholder="ABCD"> <button id="joinBtn" class="alt">加入 · 我是 P2</button></p>
+<p style="font-size:12px;opacity:.6">沒相機：<a href="?keys" style="color:#9fd6ff">鍵盤版</a>　看效果：<a href="?demo" style="color:#9fd6ff">電腦互打</a></p></div>
+<div id="arrow">➤</div>
+<script type="module">
+import * as THREE from 'three';
+
+// ---- 對戰設計表：右手 = 基本 + 移動 + 轉身，左手 = 攻擊招式 ----
+// 每位玩家可選 手勢 / 鍵盤 / 電腦，三種來源都產生同一種 input 物件（fwd/back/left/right/run/jump/punch/kick/heavy/guard）
+// ponytail: 鍵位一張表；手勢對應在下面 decide()
+const KEYS = {
+  P1: { fwd: 'KeyW', back: 'KeyS', left: 'KeyA', right: 'KeyD', run: 'ShiftLeft', jump: 'Space',           // 右手：移動 / 轉身
+        punch: 'KeyF', kick: 'KeyG', heavy: 'KeyH', guard: 'KeyR' },                                          // 左手：攻擊
+  P2: { fwd: 'ArrowUp', back: 'ArrowDown', left: 'ArrowLeft', right: 'ArrowRight', run: 'ShiftRight', jump: 'Enter',
+        punch: 'KeyI', kick: 'KeyO', heavy: 'KeyP', guard: 'KeyL' },
+};
+const HELP = (n, k) => `${n}  右手（移動）${k.fwd.replace('Key', '')} ${k.left.replace('Key', '')} ${k.back.replace('Key', '')} ${k.right.replace('Key', '')} 走/轉身  ${k.run.replace('Left', '').replace('Right', '')} 跑  ${k.jump} 跳
+${' '.repeat(n.length)}  左手（攻擊）${k.punch.replace('Key', '')} 直拳  ${k.kick.replace('Key', '')} 踢  ${k.heavy.replace('Key', '')} 上勾重拳  ${k.guard.replace('Key', '')} 防禦`;
+
+const SPEED = { walk: 1.6, run: 3.8, turn: 2.6, back: 1.1 };   // m/s、rad/s
+const ROOM = 7;                                                // 方形房間半寬 (m)
+const OBST = [{ x: 3.2, z: 3.2, w: 1, d: 1, h: 3 }, { x: -3.2, z: -3.2, w: 1, d: 1, h: 3 }, { x: -3.2, z: 3.2, w: 1, d: 1, h: 3 }, { x: 3.2, z: -3.2, w: 1, d: 1, h: 3 },
+              { x: 0, z: -4.6, w: 1.8, d: .8, h: .9 }, { x: 0, z: 4.6, w: 1.8, d: .8, h: .9 }];   // 柱子 / 矮箱：會擋人（AABB）
+function collide(p, r = .35) {                                 // 把腳底位置推出牆和障礙物
+  p.x = clamp(p.x, -ROOM + r, ROOM - r); p.z = clamp(p.z, -ROOM + r, ROOM - r);
+  for (const o of OBST) { const dx = p.x - o.x, dz = p.z - o.z, px = o.w / 2 + r - Math.abs(dx), pz = o.d / 2 + r - Math.abs(dz);
+    if (px > 0 && pz > 0) { if (px < pz) p.x += Math.sign(dx || 1) * px; else p.z += Math.sign(dz || 1) * pz; } }
+  return p;
+}
+const lerp = (a, b, w) => a + (b - a) * w;
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+const smooth = p => p * p * (3 - 2 * p);
+
+// 姿勢表（角度 rad；鍵 = 關節名，'_z' = 繞 z 軸）。肩 +x = 手往前抬、髖 +x = 腿往前、膝負 = 正常彎
+const STANCE = { shoulderL: .5, elbowL: 1.5, shoulderR: .3, elbowR: 1.6, shoulderL_z: -.25, shoulderR_z: .25, hipL: .15, hipR: .15, kneeL: -.3, kneeR: -.3, torso_y: .25 };
+const GUARD  = { shoulderL: .9, elbowL: 2.2, shoulderR: .9, elbowR: 2.2, shoulderL_z: -.3, shoulderR_z: .3, hipL: .25, hipR: .25, kneeL: -.5, kneeR: -.5, neck_x: .25 };
+const HIT    = { neck_x: -.45, shoulderL: -.6, shoulderR: -.6, elbowL: .8, elbowR: .8, hipL: .3, hipR: .3, kneeL: -.5, kneeR: -.5 };
+const TUCK   = { hipL: .7, hipR: .7, kneeL: -1.3, kneeR: -1.3, shoulderL: 2.4, shoulderR: 2.4, elbowL: .3, elbowR: .3 };
+const KO     = { shoulderL: 2.6, shoulderR: 2.6, shoulderL_z: -.6, shoulderR_z: .6, elbowL: .3, elbowR: .3, hipL: .2, hipR: -.1, kneeL: -.4, kneeR: -.2, neck_x: .3 };
+const GAIT = { walk: { hip: .45, knee: .9, arm: .5, elbow: .35, lean: 0 }, run: { hip: .8, knee: 1.6, arm: .9, elbow: 1.3, lean: .25 } };
+function gaitPose(phi, w) {
+  const g = Object.fromEntries(Object.keys(GAIT.walk).map(k => [k, lerp(GAIT.walk[k], GAIT.run[k], w)]));
+  const s = Math.sin(phi), c = Math.cos(phi);
+  return { hipL: g.hip * s, hipR: -g.hip * s, kneeL: -g.knee * Math.max(0, c), kneeR: -g.knee * Math.max(0, -c),
+           ankleL: .25 * s, ankleR: -.25 * s, shoulderL: -g.arm * s, shoulderR: g.arm * s, elbowL: g.elbow, elbowR: g.elbow, lean: g.lean };
+}
+// 招式表：dur 毫秒、hit = 判定點 (進度 0~1，過了就打一次)、reach 距離、kb 擊退、lunge 出招時往前衝。pose(p) 回傳該進度的姿勢
+// ponytail: 加招式只動這張表 + KEYS
+const ATTACKS = {
+  punch: { dur: 380, hit: .3, dmg: 8, reach: 1.25, kb: 1.6, stun: 300, lunge: .9,
+           pose: () => ({ shoulderR: 1.6, elbowR: .1, shoulderR_z: .2, shoulderL: -.3, elbowL: 1.6, shoulderL_z: -.3, torso_y: -.5, neck_y: .4 }) },
+  kick:  { dur: 560, hit: .35, dmg: 12, reach: 1.5, kb: 2.6, stun: 420, lunge: .4,
+           pose: p => ({ hipR: 1.7, kneeR: -1.3 * (1 - p), ankleR: -.4, hipL: -.25, kneeL: -.2, torso_y: -.3, shoulderL: .8, shoulderR: -.5, shoulderL_z: -.5 }) },
+  heavy: { dur: 780, hit: .45, dmg: 18, reach: 1.15, kb: 3.2, stun: 650, lunge: .5, launch: 3.2,
+           pose: p => { const w = smooth(clamp((p - .3) / .25, 0, 1));                                // 前 30% 蹲蓄力，再一口氣上勾
+             const a = { hipL: 1, hipR: 1, kneeL: -1.6, kneeR: -1.6, ankleL: .6, ankleR: .6, shoulderR: -.7, elbowR: 1.9, shoulderR_z: .2, torso_y: .5, neck_x: .2 };
+             const b = { hipL: .2, hipR: .2, kneeL: -.3, kneeR: -.3, ankleL: 0, ankleR: 0, shoulderR: 2.9, elbowR: .5, shoulderR_z: .1, torso_y: -.6, neck_x: -.3, shoulderL: -.4, elbowL: 1.2 };
+             return Object.fromEntries(Object.keys(a).map(k => [k, lerp(a[k], b[k], w)])); } },
+};
+const facing = yaw => new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw));   // 機器人本體面向 -z
+// 打不打得到：距離在 reach 內 + 對手在正前方 ±60°。回傳傷害（防禦且面對攻擊者 → 1/4）
+function resolveHit(att, def, atk) {
+  const to = def.root.position.clone().sub(att.root.position); const d = to.length(); if (d > atk.reach) return 0;
+  const f = facing(att.yaw); if (f.dot(to) / (d || 1e-9) < .5) return 0;
+  const blocked = def.guard > .5 && facing(def.yaw).dot(to) < 0;
+  return blocked ? Math.round(atk.dmg / 4) : atk.dmg;
+}
+
+// ---- 手勢層：右手 = 移動 / 轉身，左手 = 攻擊。手勢只產生跟鍵盤一樣的 input，走路動畫固定用 gaitPose ----
+// ponytail: 訊號函式從 index.html 複製過來（signals / handShape / makeGaitDetector 一字不改）；兩邊要同步改再抽成模組
+const FINGER = { thumb: [1, 2, 3, 4], index: [5, 6, 7, 8], middle: [9, 10, 11, 12], ring: [13, 14, 15, 16], pinky: [17, 18, 19, 20] };
+const sub = (a, b) => ({ x: a.x - b.x, y: a.y - b.y, z: (a.z || 0) - (b.z || 0) });
+const vlen = v => Math.hypot(v.x, v.y, v.z);
+const between = (u, v) => Math.acos(clamp((u.x * v.x + u.y * v.y + u.z * v.z) / (vlen(u) * vlen(v) || 1e-9), -1, 1));
+const ang = (a, b, c) => { const u = sub(a, b), v = sub(c, b), n = vlen(u) * vlen(v); return n < 1e-9 ? 0 : Math.PI - Math.acos(clamp((u.x * v.x + u.y * v.y + u.z * v.z) / n, -1, 1)); };
+const flex = (lm, f) => ({ mcp: ang(lm[0], lm[f[0]], lm[f[1]]), pip: ang(lm[f[0]], lm[f[1]], lm[f[2]]), dip: ang(lm[f[1]], lm[f[2]], lm[f[3]]) });
+function signals(h) {                                    // 一隻手的所有訊號：每指三關節彎曲、spread 張開角、tilt 左右傾
+  const w = h.world, i = h.img, o = {};
+  for (const f in FINGER) o[f] = flex(w, FINGER[f]);
+  const uw = sub(w[9], w[0]), vw = sub(w[5], w[17]);
+  const nx = uw.y * vw.z - uw.z * vw.y, ny = uw.z * vw.x - uw.x * vw.z, nz = uw.x * vw.y - uw.y * vw.x, nl = Math.hypot(nx, ny, nz) || 1e-9;
+  const proj = a => { const d = (a.x * nx + a.y * ny + a.z * nz) / (nl * nl); return { x: a.x - d * nx, y: a.y - d * ny, z: a.z - d * nz }; };
+  const pi = proj(sub(w[6], w[5])), pm = proj(sub(w[10], w[9]));
+  o.spread = vlen(pi) < .3 * vlen(sub(w[6], w[5])) || vlen(pm) < .3 * vlen(sub(w[10], w[9])) ? 0 : between(pi, pm);
+  const u = sub(i[9], i[0]); o.tilt = Math.atan2(u.x, Math.abs(u.y) || 1e-9);   // 原始影像 x 小 = 使用者右邊；往右傾 → tilt < 0
+  return o;
+}
+function handShape(s) {
+  const ext = f => s[f].pip < .45 && s[f].mcp < .7, curl = f => s[f].pip > 1.0, four = ['index', 'middle', 'ring', 'pinky'];
+  const thumbExt = s.thumb.pip + s.thumb.dip < .7;
+  if (four.every(ext) && s.spread > .3) return 'OPEN';
+  if (four.every(curl)) return thumbExt ? 'THUMB' : 'FIST';
+  if (ext('index') && ['middle', 'ring', 'pinky'].every(curl)) return 'POINT';
+  return '';
+}
+function makeGaitDetector(th = 0.12, windowMs = 1500, holdMs = 900) {   // 食指 − 中指 MCP 彎曲正負換邊 = 一步
+  let side = 0; const steps = [];
+  return (s, t) => {
+    const ns = s > th ? 1 : s < -th ? -1 : 0;
+    let stepped = 0;
+    if (ns && ns !== side) { if (side) { steps.push(t); stepped = ns; } side = ns; }
+    while (steps.length && t - steps[0] > windowMs) steps.shift();
+    const n = steps.length, active = n >= 2 && t - steps[n - 1] < holdMs;
+    return { active, stepped, cadence: active ? (n - 1) * 1000 / (steps[n - 1] - steps[0]) : 0 };
+  };
+}
+const RUN_CADENCE = 4.2, JUMP_LIFT = .8, KICK_DROP = .5, TURN_DEAD = .21;   // 門檻跟 index.html 一樣：步/秒、手長/0.25 s、rad/0.2 s、rad
+function makeRise(cool = 1000) {                          // 一次型：手腕 0.25 s 內往上抽 JUMP_LIFT 個手長
+  let trail = [], last = -1e9;
+  return (y, hl, now) => { trail.push({ y, t: now }); while (now - trail[0].t > 250) trail.shift();
+    if (trail.length > 1 && (trail[0].y - y) / hl > JUMP_LIFT && now - last > cool) { last = now; trail = []; return true; } return false; };
+}
+function makeFlick(cool = 800) {                          // 一次型：食指或中指 MCP 0.2 s 內彈直掉 KICK_DROP
+  const tr = { index: [], middle: [] }; let last = -1e9;
+  return (s, now) => { let hit = false;
+    for (const f of ['index', 'middle']) { const t = tr[f]; t.push({ v: s[f].mcp, t: now }); while (now - t[0].t > 200) t.shift();
+      if (t.length > 1 && t[0].v - s[f].mcp > KICK_DROP && now - last > cool) { last = now; hit = true; } }
+    return hit; };
+}
+function makeHold(ms = 200) {                             // 手型撐 ms 才算數；edge = 這一 frame 剛成立（出拳只出一次）
+  let cand = '', since = 0, name = '';
+  return (shape, now) => { if (shape !== cand) { cand = shape; since = now; } const prev = name; if (now - since > ms) name = shape; return { name, edge: !!name && name !== prev }; };
+}
+const makeGesture = () => ({ gait: makeGaitDetector(), riseR: makeRise(), riseL: makeRise(), flick: makeFlick(), holdR: makeHold(), holdL: makeHold(), label: '' });
+const handInfo = h => ({ s: signals(h), y: h.img[0].y, hl: Math.hypot(h.img[9].x - h.img[0].x, h.img[9].y - h.img[0].y) || 1e-3 });
+// L / R = handInfo() 或 null → 跟 KEYS 版一樣的 input。ponytail: 改手勢對應只動這裡
+function decide(g, L, R, now) {
+  const I = {}, tag = [];
+  if (R) {   // 右手：食/中指踏步 = 走（≥ RUN_CADENCE 跑）、手掌左右傾 = 轉身、握拳 = 退、整手往上抽 = 跳
+    const s = R.s, det = g.gait(s.index.mcp - s.middle.mcp, now), shape = g.holdR(handShape(s), now).name;
+    I.fwd = det.active; I.run = det.cadence >= RUN_CADENCE; I.back = !det.active && shape === 'FIST';
+    I.left = s.tilt > TURN_DEAD; I.right = s.tilt < -TURN_DEAD; I.jump = g.riseR(R.y, R.hl, now);
+    tag.push('右 ' + (I.jump ? '跳' : I.run ? '跑' : I.fwd ? '走' : I.back ? '退' : I.left ? '左轉' : I.right ? '右轉' : '—'));
+  } else tag.push('右 ✗');
+  if (L) {   // 左手：握拳 = 直拳、一指快速彈直 = 踢、整手往上抽 = 上勾重拳、五指張開 = 防禦
+    const s = L.s, h = g.holdL(handShape(s), now);
+    I.punch = h.name === 'FIST' && h.edge; I.kick = g.flick(s, now); I.heavy = g.riseL(L.y, L.hl, now); I.guard = h.name === 'OPEN';
+    tag.push('左 ' + (I.heavy ? '上勾' : I.kick ? '踢' : I.punch ? '拳' : I.guard ? '防' : '—'));
+  } else tag.push('左 ✗');
+  g.label = tag.join('  '); return I;
+}
+
+// ---- 3D 場景 ----
+const renderer = new THREE.WebGLRenderer({ canvas: document.getElementById('gl'), antialias: true, alpha: true });
+const LITE = new URLSearchParams(location.search).has('lite');
+renderer.setPixelRatio(LITE ? 1 : devicePixelRatio); renderer.shadowMap.enabled = !LITE;
+const scene = new THREE.Scene(); scene.fog = new THREE.Fog(0x15151c, 8, 30);
+const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 100);
+scene.add(new THREE.HemisphereLight(0xbfb8ff, 0x201c40, 1.4));
+const sun = new THREE.DirectionalLight(0xffffff, 2.2); sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048); Object.assign(sun.shadow.camera, { left: -8, right: 8, top: 8, bottom: -8, near: 1, far: 30 });
+sun.position.set(-3, 9, -3); scene.add(sun, sun.target);
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(200, 200), new THREE.MeshStandardMaterial({ color: 0x15151c, roughness: 1 }));
+ground.rotation.x = -Math.PI / 2; ground.receiveShadow = true; scene.add(ground);
+scene.add(new THREE.GridHelper(60, 60, 0x7a6fe0, 0x2e2a5a));
+// 房間：反面渲染的大箱子（從外面看是透明的，側面攝影機不會被牆擋）+ 牆頂霓虹條 + 柱子 / 矮箱
+const room = new THREE.Mesh(new THREE.BoxGeometry(ROOM * 2, 4.5, ROOM * 2), new THREE.MeshStandardMaterial({ color: 0x1d1f33, roughness: .9, side: THREE.BackSide }));
+room.position.y = 2.25; room.receiveShadow = true; scene.add(room);
+const neon = new THREE.MeshBasicMaterial({ color: 0x7a6fe0 });
+for (const [x, z, w, d] of [[0, -ROOM, ROOM * 2, .06], [0, ROOM, ROOM * 2, .06], [-ROOM, 0, .06, ROOM * 2], [ROOM, 0, .06, ROOM * 2]]) {
+  const m = new THREE.Mesh(new THREE.BoxGeometry(w, .06, d), neon); m.position.set(x, 3.2, z); scene.add(m);
+  const b = new THREE.Mesh(new THREE.BoxGeometry(w, .04, d), new THREE.MeshBasicMaterial({ color: 0xf5c531 })); b.position.set(x, .02, z); scene.add(b);   // 地板邊線
+}
+const obstMat = new THREE.MeshStandardMaterial({ color: 0x3a3d55, roughness: .7 }), obstTop = new THREE.MeshBasicMaterial({ color: 0xf5c531 });
+for (const o of OBST) {
+  const m = new THREE.Mesh(new THREE.BoxGeometry(o.w, o.h, o.d), obstMat); m.position.set(o.x, o.h / 2, o.z); m.castShadow = m.receiveShadow = true; scene.add(m);
+  const t = new THREE.Mesh(new THREE.BoxGeometry(o.w + .02, .04, o.d + .02), obstTop); t.position.set(o.x, o.h + .02, o.z); scene.add(t);   // 頂上黃邊，遠遠看得出高度
+}
+
+// 機器人：跟 index.html 同一具，改成可以蓋兩具 + 換色。a = 胸/手臂色，b = 腿/頭色
+const INK = new THREE.MeshBasicMaterial({ color: 0x101216, side: THREE.BackSide });
+function buildRobot(a, b) {
+  const toon = (color, extra = {}) => new THREE.MeshToonMaterial({ color, ...extra });
+  const MAT = { a: toon(a), b: toon(b), grey: toon(0x9097a0), dark: toon(0x363a41),
+                yellow: toon(0xf5c531, { emissive: 0xf5c531, emissiveIntensity: .35 }), glass: toon(0x9fd6ff, { emissive: 0x3d9bff, emissiveIntensity: .6 }) };
+  function part(parent, geo, m, x = 0, y = 0, z = 0, rx = 0, rz = 0, outline = true) {
+    const o = new THREE.Mesh(geo, m); o.position.set(x, y, z); o.rotation.set(rx, 0, rz); o.castShadow = true;
+    if (outline && !LITE) { const ink = new THREE.Mesh(geo, INK); ink.scale.setScalar(1.05); o.add(ink); }
+    parent.add(o); return o;
+  }
+  const box = (parent, m, w, h, d, ...p) => part(parent, new THREE.BoxGeometry(w, h, d), m, ...p);
+  const cyl = (parent, m, r, len, ...p) => part(parent, new THREE.CylinderGeometry(r, r, len, 12), m, ...p);
+  const J = {}, joint = (name, parent, x, y, z) => { const g = new THREE.Group(); g.position.set(x, y, z); parent.add(g); J[name] = g; return g; };
+  const root = new THREE.Group(); scene.add(root);
+  const pelvis = new THREE.Group(); pelvis.position.y = 0.98; root.add(pelvis);
+  box(pelvis, MAT.grey, .40, .18, .24); box(pelvis, MAT.dark, .16, .14, .20, 0, -.10, 0);
+  for (const [s, sx] of [['L', -1], ['R', 1]]) {
+    box(pelvis, MAT.b, .10, .16, .24, sx * .21, -.02, 0);
+    const hip = joint('hip' + s, pelvis, sx * .12, -.06, 0);
+    part(hip, new THREE.SphereGeometry(.07, 12, 10), MAT.dark, 0, 0, 0, 0, 0, false);
+    box(hip, MAT.b, .17, .40, .19, 0, -.24, 0); box(hip, MAT.grey, .10, .12, .04, 0, -.16, -.10);
+    const knee = joint('knee' + s, hip, 0, -.45, 0);
+    box(knee, MAT.grey, .19, .12, .10, 0, -.03, -.07); box(knee, MAT.b, .18, .36, .21, 0, -.22, 0); box(knee, MAT.dark, .06, .18, .02, 0, -.22, -.115);
+    const ankle = joint('ankle' + s, knee, 0, -.42, 0);
+    box(ankle, MAT.b, .19, .10, .30, 0, -.05, -.05); box(ankle, MAT.dark, .19, .04, .30, 0, -.10, -.05); box(ankle, MAT.grey, .19, .07, .08, 0, -.055, -.23);
+  }
+  const torso = new THREE.Group(); torso.position.y = .1; pelvis.add(torso); J.torso = torso;
+  box(torso, MAT.grey, .34, .24, .24, 0, .10, 0);
+  for (const x of [-.09, 0, .09]) box(torso, MAT.dark, .04, .16, .02, x, .10, -.125);
+  box(torso, MAT.a, .52, .38, .32, 0, .40, 0);
+  for (const sx of [-1, 1]) {
+    const s = sx < 0 ? 'L' : 'R';
+    box(torso, MAT.glass, .17, .15, .02, sx * .14, .45, -.165); box(torso, MAT.yellow, .08, .05, .02, sx * .07, .27, -.165);
+    box(torso, MAT.yellow, .03, .10, .02, sx * .245, .40, -.165); cyl(torso, MAT.grey, .035, .42, sx * .19, .52, .19);
+    const sh = joint('shoulder' + s, torso, sx * .3, .5, 0);
+    box(sh, MAT.a, .24, .22, .26, sx * .07, .02, 0); box(sh, MAT.a, .16, .28, .16, 0, -.18, 0);
+    const el = joint('elbow' + s, sh, 0, -.32, 0);
+    part(el, new THREE.SphereGeometry(.07, 12, 10), MAT.dark, 0, 0, 0, 0, 0, false);
+    box(el, MAT.a, .19, .26, .19, 0, -.15, 0); box(el, MAT.dark, .20, .05, .20, 0, -.03, 0);
+    const wr = joint('wrist' + s, el, 0, -.3, 0);
+    box(wr, MAT.grey, .16, .15, .15, 0, -.08, 0); box(wr, MAT.dark, .17, .04, .16, 0, -.03, 0);
+  }
+  const neck = joint('neck', torso, 0, .62, 0);
+  cyl(neck, MAT.dark, .05, .08, 0, .04, 0); box(neck, MAT.b, .30, .27, .30, 0, .22, 0); box(neck, MAT.grey, .22, .12, .05, 0, .15, -.16); box(neck, MAT.dark, .26, .09, .03, 0, .265, -.16);
+  for (const sx of [-1, 1]) { box(neck, MAT.glass, .07, .03, .02, sx * .065, .265, -.175); box(neck, MAT.b, .05, .17, .11, sx * .165, .34, 0); }
+  box(neck, MAT.a, .12, .08, .04, 0, .34, -.155);
+  root.updateMatrixWorld(true);
+  return { root, pelvis, torso, J, restY: J.ankleL.getWorldPosition(new THREE.Vector3()).y };
+}
+const ANGLES = ['hipL', 'hipR', 'kneeL', 'kneeR', 'ankleL', 'ankleR', 'hipL_z', 'hipR_z', 'shoulderL', 'shoulderR', 'elbowL', 'elbowR', 'wristL', 'wristR',
+                'shoulderL_z', 'shoulderR_z', 'torso_y', 'neck_x', 'neck_y'];
+function makeFighter(name, a, b, x, yaw) {
+  const f = { name, ...buildRobot(a, b), hp: 100, yaw, yaw0: yaw, x0: x, angle: Object.fromEntries(ANGLES.map(k => [k, 0])),
+              gait: { phi: 0, w: 0, run: 0, lean: 0 }, jump: { y: 0, vy: 0, air: 0 }, act: null, guard: 0, stun: 0, hitW: 0, kb: new THREE.Vector3(),
+              ko: 0, koT: 0, turnLean: 0, input: {}, aiT: 0, aiTurnUntil: 0, aiLast: null, g: makeGesture() };
+  f.root.position.set(x, 0, 0); return f;
+}
+const P1 = makeFighter('P1', 0xd8262b, 0x2c5f92, -1.6, -Math.PI / 2);   // 面向 +x
+const P2 = makeFighter('P2', 0x2e9e5b, 0xf0862b, 1.6, Math.PI / 2);     // 面向 -x
+const fighters = [P1, P2];
+
+// 打擊火花：小黃球彈出再淡掉。ponytail: 粒子只用一顆球 + 縮放，要爽再換 sprite
+const sparks = [];
+let hitCount = 0, lastHit = null;                           // 給連線用：客戶端看到 hitCount 變了就在 lastHit 的位置放火花
+function spark(pos, big) {
+  const m = new THREE.Mesh(new THREE.SphereGeometry(big ? .22 : .14, 8, 6), new THREE.MeshBasicMaterial({ color: 0xffe36b, transparent: true }));
+  m.position.copy(pos); scene.add(m); sparks.push({ m, t: 0 }); hitCount++; lastHit = { p: pos.toArray().map(r3), big: !!big };
+}
+const r3 = v => Math.round(v * 1000) / 1000;
+let shake = 0;
+
+function startAttack(f, name, now) { if (f.act || f.stun > 0 || f.ko || f.jump.air) return; f.act = { name, t0: now, done: false }; }
+function hitFighter(att, def, atk, now) {
+  const dmg = resolveHit(att, def, atk); if (!dmg) return;
+  const blocked = dmg < atk.dmg;
+  def.hp = Math.max(0, def.hp - dmg); def.stun = blocked ? 150 : atk.stun; def.hitW = 1; def.act = null;
+  def.kb.copy(facing(att.yaw)).multiplyScalar(atk.kb * (blocked ? .4 : 1));
+  if (atk.launch && !blocked) { def.jump.vy = atk.launch; def.jump.air = 1; }
+  const limb = atk === ATTACKS.kick ? att.J.ankleR : att.J.wristR;
+  spark(limb.getWorldPosition(new THREE.Vector3()), !blocked && atk === ATTACKS.heavy); shake = blocked ? .05 : atk === ATTACKS.heavy ? .3 : .12;
+  if (def.hp <= 0 && !def.ko) { def.ko = 1; def.koT = now; def.act = null; msg(`${att.name} WIN`); setTimeout(reset, 3000); }
+}
+
+// ---- 每 frame：輸入 → 移動 → 姿勢分層混合 ----
+function applyJoints(f) { for (const k of ANGLES) { const [n, ax = 'x'] = k.split('_'); f.J[n].rotation[ax] = f.angle[k]; } }
+function updateFighter(f, opp, dt, now) {
+  const I = f.input, G = f.gait, Jp = f.jump;
+  const busy = f.act || f.stun > 0 || f.ko;
+  f.stun = Math.max(0, f.stun - dt * 1000);
+  // 右手：移動 / 轉身 / 跑 / 跳（出招、被打、KO 時鎖住）
+  let v = 0, turn = 0;
+  if (!busy) {
+    v = I.fwd ? (I.run ? SPEED.run : SPEED.walk) : I.back ? -SPEED.back : 0;
+    turn = ((I.left ? 1 : 0) - (I.right ? 1 : 0)) * SPEED.turn;
+    if (I.jump && !Jp.air) { Jp.vy = 4.5; Jp.air = 1; }
+    for (const k of ['punch', 'kick', 'heavy']) if (I[k]) startAttack(f, k, now);
+  }
+  if (f.act) { const a = ATTACKS[f.act.name], p = (now - f.act.t0) / a.dur; if (p < .5) v = a.lunge; }   // 出招前半段往前衝一點
+  f.guard += (((I.guard && !busy) ? 1 : 0) - f.guard) * Math.min(1, dt * 12);
+  if (f.guard > .5) v *= .4;
+  f.yaw += turn * dt;
+  f.turnLean += (turn * .12 - f.turnLean) * Math.min(1, dt * 8);                       // 轉身時身體往內側傾
+  const dir = facing(f.yaw);
+  f.root.position.addScaledVector(dir, v * dt).add(f.kb.clone().multiplyScalar(dt));
+  f.kb.multiplyScalar(Math.exp(-6 * dt));                                             // 擊退滑行減速
+  // 場地邊線 + 兩人不能重疊
+  collide(f.root.position);
+  const sep = f.root.position.clone().sub(opp.root.position); const d = sep.length();
+  if (d < .75 && d > 1e-6) f.root.position.add(sep.multiplyScalar((.75 - d) / d * .5));
+
+  // 步態：速度 → 步頻；倒退 = 相位倒轉
+  const moving = Math.abs(v) > .05 && !Jp.air;
+  G.w += ((moving ? 1 : 0) - G.w) * Math.min(1, dt * 8);
+  G.run += (((v > SPEED.walk + .1) ? 1 : 0) - G.run) * Math.min(1, dt * 6);
+  G.phi += Math.PI * Math.abs(v) * 2.2 * dt * Math.sign(v || 1);
+  const gp = gaitPose(G.phi, G.run); G.lean = gp.lean * G.w;
+
+  // 跳：拋物線
+  if (Jp.air) { Jp.y += Jp.vy * dt; Jp.vy -= 12 * dt; if (Jp.y <= 0) { Jp.y = 0; Jp.vy = 0; Jp.air = 0; } }
+
+  // 招式判定（判定窗內只打一次）
+  if (f.act) {
+    const a = ATTACKS[f.act.name], p = (now - f.act.t0) / a.dur;
+    if (!f.act.done && p >= a.hit && !opp.ko) { f.act.done = true; hitFighter(f, opp, a, now); }   // 過了判定點就打一次（fps 低也不會整個窗被跳過）
+    if (p >= 1) f.act = null;
+  }
+  f.hitW *= Math.exp(-5 * dt);
+
+  // 姿勢分層：站姿 → 步態 → 防禦 → 招式 → 被打 → 跳 → KO，後面的蓋前面的
+  const t = {}; for (const k of ANGLES) t[k] = STANCE[k] || 0;
+  for (const k in gp) if (k in t) t[k] = lerp(t[k], gp[k], G.w);
+  for (const k in GUARD) t[k] = lerp(t[k], GUARD[k], f.guard);
+  if (f.act) { const a = ATTACKS[f.act.name], p = clamp((now - f.act.t0) / a.dur, 0, 1), ap = a.pose(p), w = a === ATTACKS.heavy ? Math.min(1, p * 6, (1 - p) * 4) : Math.sin(Math.PI * p);
+    for (const k in ap) t[k] = lerp(t[k], ap[k], w); }
+  for (const k in HIT) t[k] = lerp(t[k], HIT[k], f.hitW);
+  const tuck = Math.min(1, Jp.y / .35); for (const k in TUCK) t[k] = lerp(t[k], TUCK[k], tuck);
+  const koW = f.ko ? smooth(Math.min(1, (now - f.koT) / 700)) : 0;
+  for (const k in KO) t[k] = lerp(t[k], KO[k], koW);
+  const k0 = 1 - Math.exp(-(f.act || f.hitW > .3 ? 40 : 22) * dt);                     // 出招/挨打反應快一點
+  for (const k of ANGLES) f.angle[k] += (t[k] - f.angle[k]) * k0;
+  applyJoints(f);
+
+  // 整體：面向、前傾、待機呼吸、轉身傾斜、被打後仰、KO 倒地
+  f.root.rotation.y = f.yaw;
+  f.torso.rotation.x = -G.lean + f.hitW * .5;
+  f.torso.position.y = .1 + Math.sin(now / 500) * .01 * (1 - G.w);
+  f.pelvis.rotation.z = f.turnLean; f.pelvis.rotation.x = 0;
+  f.root.rotation.x = koW * 1.45; f.root.position.y = 0; f.root.updateMatrixWorld(true);   // KO：整具往後倒
+  const fy = Math.min(f.J.ankleL.getWorldPosition(new THREE.Vector3()).y, f.J.ankleR.getWorldPosition(new THREE.Vector3()).y);
+  f.root.position.y = koW ? lerp(f.restY - fy, .12, koW) : f.restY - fy + Jp.y;      // 低的那隻腳貼地
+}
+
+// 電腦：每 0.25 s 決定一次。轉向對手 → 太遠就走/跑過去 → 在射程就隨機出招 / 防禦 / 退
+function aiThink(f, opp, now) {
+  if (now < f.aiT) return; f.aiT = now + 250;
+  const to = opp.root.position.clone().sub(f.root.position); const d = to.length();
+  const wantYaw = Math.atan2(-to.x, -to.z); let dy = wantYaw - f.yaw; dy = Math.atan2(Math.sin(dy), Math.cos(dy));
+  const I = f.input = { left: dy > .15, right: dy < -.15 };
+  if (Math.abs(dy) > .6) return;
+  const r = Math.random();
+  if (d > 1.4) {                                                                         // 走過去；被柱子擋住（0.25 s 沒前進）就邊轉邊走繞開
+    const moved = f.aiLast ? f.root.position.distanceTo(f.aiLast) : 1; f.aiLast = f.root.position.clone();
+    if (moved < .05) f.aiTurnUntil = now + 700;
+    I.fwd = true; I.run = d > 3 && now > f.aiTurnUntil; I.left = now < f.aiTurnUntil; I.right = false; return; }
+  if (opp.act && r < .25) { I.guard = true; return; }                                  // 對手出招 → 有機會格擋（2026-09-13 從 .45 降：兩邊互擋打不完）
+  if (r < .35) I.punch = true; else if (r < .55) I.kick = true; else if (r < .68) I.heavy = true;
+  else if (r < .8) I.back = true; else if (r < .88) I.jump = true; else I.guard = true;
+}
+
+// ---- 攝影機：從兩人連線的側面看，距離依兩人間距縮放 ----
+// ---- 攝影機：連線時 = 第三人稱跟在自己機器人後面（tps），對手不在畫面內時下方箭頭指過去；單機 / demo = 兩人連線的側面（side）。?cam=tps|side 強制 ----
+let camSide = new THREE.Vector3(0, 0, 1), first = true;
+const camMode = () => Q.get('cam') || (NET.p ? 'tps' : 'side');
+function followCam(dt) {
+  const a = P1.root.position, b = P2.root.position, mid = a.clone().add(b).multiplyScalar(.5);
+  let want, look;
+  if (camMode() === 'tps') {
+    const me = NET.p === 2 ? P2 : P1, f = facing(me.yaw);
+    want = me.root.position.clone().addScaledVector(f, -3.4).setY(2.0); collide(want, .4);   // 攝影機也不穿牆
+    look = me.root.position.clone().addScaledVector(f, 1.5).setY(1.0);
+  } else {
+    const sep = a.distanceTo(b), line = b.clone().sub(a).setY(0).normalize(), side = new THREE.Vector3(line.z, 0, -line.x);
+    if (side.dot(camSide) < 0) side.negate();                                           // 不要突然跳到另一側
+    camSide.lerp(side, Math.min(1, dt * 2)).normalize();
+    want = mid.clone().addScaledVector(camSide, Math.max(5.6, sep * 1.2 + 2.2)).setY(2.3); look = mid.clone().setY(1.05);
+  }
+  if (first) camera.position.copy(want); else camera.position.lerp(want, 1 - Math.exp(-3 * dt));
+  const jx = (Math.random() - .5) * shake, jy = (Math.random() - .5) * shake; shake *= Math.exp(-8 * dt);
+  camera.lookAt(look.x + jx, look.y + jy, look.z);
+  sun.position.copy(mid).add(new THREE.Vector3(-3, 9, -3)); sun.target.position.copy(mid);
+  first = false;
+  const ar = $('arrow');
+  if (camMode() === 'tps') {                                                            // 對手不在畫面裡 → 箭頭指向他（以攝影機為準）
+    const opp = NET.p === 2 ? P1 : P2, v = opp.root.position.clone().setY(1).sub(camera.position).applyQuaternion(camera.quaternion.clone().invert());
+    const ndc = opp.root.position.clone().setY(1).project(camera), inView = ndc.z < 1 && Math.abs(ndc.x) < .95 && Math.abs(ndc.y) < .95;
+    ar.style.display = inView ? 'none' : 'flex'; ar.style.transform = `rotate(${Math.atan2(v.x, -v.z) - Math.PI / 2}rad)`;
+  } else ar.style.display = 'none';
+}
+
+// ---- 輸入 / HUD ----
+const down = new Set();
+addEventListener('keydown', e => { down.add(e.code); if (e.code === 'Escape') { if (NET.p === 2) NET.wantReset = true; else reset(); } if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) e.preventDefault(); });
+addEventListener('keyup', e => down.delete(e.code));
+function readKeys(f, keys) { const I = {}; for (const k in keys) I[k] = down.has(keys[k]); return I; }
+const $ = id => document.getElementById(id);
+$('k1').textContent = HELP('P1', KEYS.P1); $('k2').textContent = HELP('P2', KEYS.P2);
+// ponytail: 一次固定兩人，兩邊同一種輸入來源（demo 用）：hand 相機手勢 / key 鍵盤 (?keys 或相機失敗) / ai 電腦互打 (?demo)
+const Q = new URLSearchParams(location.search);
+let SRC = Q.has('demo') ? 'ai' : Q.has('keys') ? 'key' : 'hand';
+function setSrc(m) { SRC = m; $('keys').hidden = m !== 'key'; $('help').hidden = m === 'key'; $('hands').hidden = m !== 'hand'; 
+  $('help').innerHTML = m === 'hand' ? '<b>右手</b> 踏步走 · 快踏跑 · 掌傾轉身 · 握拳退 · 抽高跳　　<b>左手</b> 握拳直拳 · 彈指踢 · 抽高上勾 · 張手防　　Esc 重開' : m === 'ai' ? '電腦互打 demo　Esc 重開' : 'Esc 重開'; }
+
+// ---- 相機 → MediaPipe → 分給兩位玩家 ----
+const cam = $('cam'), ov = $('ov'), ctx = ov.getContext('2d');
+const SWAP = new URLSearchParams(location.search).has('swap');
+let landmarker = null, hands = [], lastVideoTime = -1, camNote = '';
+function readHands(now) {
+  if (!landmarker || cam.readyState < 2 || cam.currentTime === lastVideoTime) return;   // 沒新影格就沿用上一次
+  lastVideoTime = cam.currentTime;
+  const r = landmarker.detectForVideo(cam, now);
+  hands = assign(r.landmarks.map((img, i) => { let label = r.handedness[i][0].categoryName; if (SWAP) label = label === 'Left' ? 'Right' : 'Left'; return { label, img, world: r.worldLandmarks[i] }; }));
+}
+function assign(hs) { return hs; }                          // 這台相機看到的手全是本機玩家的（一人一台電腦）
+// ponytail: 兩隻手都被認成同一邊時，另一隻就閒置；真的常發生再用 x 排序硬分左右
+function playerHands() { const R = hands.find(h => h.label === 'Right') || null; return { R, L: hands.find(h => h !== R && h.label === 'Left') || null }; }
+function drawHands() {
+  const k = devicePixelRatio || 1, w = ov.clientWidth, h = ov.clientHeight;
+  if (ov.width !== w * k) { ov.width = w * k; ov.height = h * k; }
+  ctx.setTransform(k, 0, 0, k, 0, 0); ctx.clearRect(0, 0, w, h);
+  for (const hd of hands) { ctx.fillStyle = hd.label === 'Right' ? '#9fd6ff' : '#f5c531';   // 右手藍（移動）、左手黃（攻擊）
+    for (const p of hd.img) { ctx.beginPath(); ctx.arc(p.x * w, p.y * h, 3, 0, 7); ctx.fill(); } }
+}
+async function startCamera() {
+  try {
+    const V = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1';
+    const { FilesetResolver, HandLandmarker } = await import(`${V}/vision_bundle.mjs`);
+    landmarker = await HandLandmarker.createFromOptions(await FilesetResolver.forVisionTasks(`${V}/wasm`), {
+      baseOptions: { modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task', delegate: 'GPU' },
+      runningMode: 'VIDEO', numHands: 4,
+    });
+    cam.srcObject = await Promise.race([navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720 } }),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('20 秒沒回應相機權限')), 20000))]);   // 沒相機 / 權限對話框沒人按 → 不要卡死
+    await cam.play(); cam.style.display = ov.style.display = 'block'; setSrc('hand');
+  } catch (e) { camNote = `相機 / 模型載入失敗 → 改用鍵盤\n${e.message}`; setSrc('key'); $('hands').hidden = false; console.warn(e); }
+}
+// ---- 連線：PeerJS（WebRTC 點對點，信令走 peerjs 公共伺服器，所以放靜態網站就能跑）----
+// 先開的人 = P1 主機：拿到 4 碼房號、跑整個模擬、30 Hz 送畫面狀態；P2 輸入房號加入，只送自己的 input、照主機的狀態畫
+// ponytail: 沒做預測 / 插補，同 Wi-Fi 一鍵到對手畫面約 20~50 ms；沒 TURN，對稱 NAT 後面可能連不上
+const NET = { p: 0, code: '', conn: null, ready: false, remote: {}, remoteAt: -1e9, state: null, stateAt: -1e9, acc: {}, hits: 0, wantReset: false, resetSeq: 0, resetSeen: 0, err: '' };
+const PEER_NS = 'robotfight-';
+const randomCode = () => Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ'[Math.random() * 24 | 0]).join('');
+function mkPeer(id) {
+  const p = id ? new Peer(id, { debug: 0 }) : new Peer({ debug: 0 });
+  p.on('error', e => { NET.err = { 'peer-unavailable': '找不到這個房號', 'unavailable-id': '房號被占用，重新整理再開一次', 'network': '連不到信令伺服器' }[e.type] || e.type; console.warn(e); });
+  addEventListener('pagehide', () => p.destroy());
+  return p;
+}
+function host(code) {
+  NET.p = 1; NET.code = code; const p = mkPeer(PEER_NS + code); p.on('open', () => NET.ready = true);
+  p.on('connection', c => { NET.conn = c; c.on('data', d => { NET.remote = d; NET.remoteAt = performance.now(); }); c.on('close', () => { if (NET.conn === c) NET.conn = null; }); });
+}
+function guest(code) {
+  NET.p = 2; NET.code = code; const p = mkPeer();
+  p.on('open', () => { const c = p.connect(PEER_NS + code, { serialization: 'json' }); c.on('open', () => { NET.conn = c; NET.ready = true; });
+    c.on('data', d => { NET.state = d; NET.stateAt = performance.now(); }); c.on('close', () => { NET.conn = null; NET.err = '對手斷線'; }); });
+}
+let lastPub = 0;
+function send(obj) {                                       // 30 Hz 節流；P2 的一次型 input（拳/踢/跳）用 OR 累積，不會因為跳過的 frame 掉招
+  if (NET.p === 2) for (const k in obj) NET.acc[k] = NET.acc[k] || obj[k];
+  if (!NET.conn || performance.now() - lastPub < 33) return; lastPub = performance.now();
+  try { NET.conn.send(NET.p === 1 ? obj : NET.acc); } catch (e) { console.warn(e); } NET.acc = {};
+}
+function snapshot() {
+  return { f: fighters.map(f => ({ p: f.root.position.toArray().map(r3), r: [r3(f.root.rotation.x), r3(f.root.rotation.y)], a: ANGLES.map(k => r3(f.angle[k])),
+                                    t: [r3(f.torso.rotation.x), r3(f.torso.position.y), r3(f.pelvis.rotation.z)], hp: f.hp })), m: $('msg').textContent, h: hitCount, fx: lastHit };
+}
+function applySnapshot(s) {
+  s.f.forEach((d, i) => { const f = fighters[i]; f.root.position.fromArray(d.p); f.root.rotation.set(d.r[0], d.r[1], 0); ANGLES.forEach((k, j) => f.angle[k] = d.a[j]); applyJoints(f);
+    f.torso.rotation.x = d.t[0]; f.torso.position.y = d.t[1]; f.pelvis.rotation.z = d.t[2]; f.hp = d.hp; });
+  msg(s.m);
+  if (s.h !== NET.hits) { NET.hits = s.h; if (s.fx) { spark(new THREE.Vector3().fromArray(s.fx.p), s.fx.big); shake = s.fx.big ? .3 : .12; } }
+}
+function netStatus(now) {
+  if (!NET.p) return SRC === 'ai' ? 'ROBOT FIGHT · 電腦互打' : 'ROBOT FIGHT';
+  const err = NET.err ? ` · ${NET.err}` : '';
+  if (NET.p === 1) return `房號 ${NET.code} · ${now - NET.remoteAt < 1000 ? '對手已連線' : NET.ready ? '等對手輸入房號… 先由電腦代打' : '連線中…'}${err}`;
+  return `房號 ${NET.code} · ${now - NET.stateAt < 1000 ? '已連線（你是 P2 綠）' : '連線中…'}${err}`;
+}
+function goOnline() {                                      // 開房 or 加入；?room=XXXX 指定房號、?join=XXXX 直接加入
+  const j = ($('code').value || Q.get('join') || '').trim().toUpperCase();
+  if (j.length === 4) guest(j); else host((Q.get('room') || randomCode()).toUpperCase());
+  if (SRC === 'key') { $('k1').textContent = HELP(`你 = P${NET.p}`, KEYS.P1); $('k2').hidden = true; }
+}
+async function begin(btn) { for (const b of ['go', 'joinBtn']) $(b).disabled = true; btn.textContent = '相機載入中…'; await startCamera(); goOnline(); $('start').hidden = true; reset(); }
+$('go').onclick = () => { $('code').value = ''; begin($('go')); };
+$('joinBtn').onclick = () => { if ($('code').value.trim().length === 4) begin($('joinBtn')); else $('code').focus(); };
+$('code').value = Q.get('join') || '';
+if (SRC !== 'hand') { $('start').hidden = true; setSrc(SRC); if (SRC === 'key') goOnline(); }
+function msg(s) { $('msg').textContent = s; $('msg').style.opacity = s ? 1 : 0; }
+function reset() {
+  for (const f of fighters) { Object.assign(f, { hp: 100, yaw: f.yaw0, act: null, guard: 0, stun: 0, hitW: 0, ko: 0, turnLean: 0 }); f.jump = { y: 0, vy: 0, air: 0 }; f.kb.set(0, 0, 0); f.root.position.set(f.x0, 0, 0); }
+  msg('FIGHT'); setTimeout(() => msg(''), 900);
+}
+function resize() { const W = innerWidth, H = innerHeight; renderer.setSize(W, H, false); camera.aspect = W / H; camera.updateProjectionMatrix(); }
+addEventListener('resize', resize); resize(); reset();
+
+let last = 0;
+function frame(now) {
+  const dt = Math.min(.05, (now - last) / 1000 || .016); last = now;
+  readHands(now);
+  const started = $('start').hidden, status = [];
+  const localInput = f => { if (SRC === 'key') return readKeys(f, NET.p ? KEYS.P1 : KEYS[f.name]);
+    const { L, R } = playerHands(); const I = decide(f.g, L && handInfo(L), R && handInfo(R), now); status.push(f.g.label); return I; };
+  if (NET.p === 2) {                                       // 客戶端：送自己的 input、畫主機送來的狀態
+    const I = started ? localInput(P2) : {}; if (NET.wantReset) { I.reset = ++NET.resetSeq; NET.wantReset = false; }
+    send(I); if (NET.state) applySnapshot(NET.state);
+  } else {
+    for (const [f, opp] of [[P1, P2], [P2, P1]]) {
+      const remote = f === P2 && NET.p === 1 && now - NET.remoteAt < 1000;   // 主機：P2 的 input 從對手的瀏覽器來
+      if (f.ko || !started) f.input = {};
+      else if (remote) { f.input = NET.remote; if (NET.remote.reset && NET.remote.reset !== NET.resetSeen) { NET.resetSeen = NET.remote.reset; reset(); } }
+      else if (SRC === 'ai' || (f === P2 && (NET.p === 1 || SRC === 'hand'))) aiThink(f, opp, now);   // 對手還沒進來 → 電腦代打
+      else f.input = localInput(f);
+    }
+    updateFighter(P1, P2, dt, now); updateFighter(P2, P1, dt, now);
+    if (NET.p === 1) send(snapshot());
+  }
+  $('mid').textContent = netStatus(now);
+  drawHands(); $('hands').textContent = camNote || status.join('\n');
+  for (let i = sparks.length - 1; i >= 0; i--) { const s = sparks[i]; s.t += dt * 4; s.m.scale.setScalar(1 + s.t * 2.5); s.m.material.opacity = 1 - s.t; s.m.position.y += dt * .6;
+    if (s.t >= 1) { scene.remove(s.m); sparks.splice(i, 1); } }
+  followCam(dt);
+  $('b1').firstElementChild.style.transform = `scaleX(${P1.hp / 100})`; $('b2').firstElementChild.style.transform = `scaleX(${P2.hp / 100})`;
+  $('b1').lastElementChild.textContent = `P1  ${P1.hp}`; $('b2').lastElementChild.textContent = `${P2.hp}  P2`;
+  renderer.render(scene, camera);
+}
+// 分頁被切到背景時 rAF 會停，主機一停對手畫面就凍住 → 背景改用 setTimeout 30 Hz 撐著
+function tick(now) { frame(now); if (document.hidden) setTimeout(() => tick(performance.now()), 33); else requestAnimationFrame(tick); }
+requestAnimationFrame(tick);
+Object.assign(window, { __P1: P1, __P2: P2, __hit: hitFighter, __ATTACKS: ATTACKS, __setHands: h => { hands = assign(h); }, __setSrc: setSrc, __NET: NET, __decide: decide, __handInfo: handInfo, __playerHands: playerHands });   // 除錯 / 驗證用（__setHands：沒相機時塞假手）
+
+// ---- 自我檢查：命中幾何 + 防禦減傷 ----
+{
+  const mk = (x, z, yaw, guard = 0) => ({ root: { position: new THREE.Vector3(x, 0, z) }, yaw, guard });
+  const A = mk(0, 0, 0);                                                   // 站原點，面向 -z
+  const ok = resolveHit(A, mk(0, -1, Math.PI), ATTACKS.punch) === 8       // 正前方 1 m，面對面 → 打中
+          && resolveHit(A, mk(0, 1, 0), ATTACKS.punch) === 0              // 在背後 → 沒打到
+          && resolveHit(A, mk(0, -3, Math.PI), ATTACKS.kick) === 0        // 太遠
+          && resolveHit(A, mk(0, -1, Math.PI, 1), ATTACKS.punch) === 2    // 面對我防禦 → 1/4
+          && resolveHit(A, mk(0, -1, 0, 1), ATTACKS.punch) === 8;         // 背對我防禦 → 沒用
+  console.assert(ok, 'resolveHit broken');
+  // 手勢 → input：右手 2 Hz 踏步 → 走；掌傾 → 左轉；左手握拳 → 拳只出一次；張手 → 防；抽高 → 上勾
+  const g = makeGesture(), H = (s, y = .5) => ({ s, y, hl: .2 });
+  const sig = (pip, mcp, spread, tilt = 0, thumb = { mcp: .1, pip: .1, dip: .1 }) =>
+    ({ thumb, index: { mcp, pip, dip: .1 }, middle: { mcp, pip, dip: .1 }, ring: { mcp, pip, dip: .1 }, pinky: { mcp, pip, dip: .1 }, spread, tilt });
+  let I1; for (let i = 0; i <= 40; i++) { const s = sig(.5, .5, .1); s.index.mcp = .5 + .3 * Math.sin(2 * Math.PI * 2 * i * 33 / 1000); I1 = decide(g, null, H(s), i * 33); }
+  let punches = 0, I2; for (let i = 0; i < 15; i++) { I2 = decide(g, H(sig(1.3, .8, 0, 0, { mcp: .5, pip: .6, dip: .4 })), H(sig(.2, .3, .4, .4)), 3000 + i * 33); punches += I2.punch ? 1 : 0; }
+  decide(g, H(sig(.2, .3, .4)), null, 4000); const I3 = decide(g, H(sig(.2, .3, .4)), null, 4300);
+  decide(g, H(sig(.5, .5, .1), .8), null, 5000); const I4 = decide(g, H(sig(.5, .5, .1), .5), null, 5100);
+  const gOk = I1.fwd && !I1.run && !I2.fwd && I2.left && !I2.right && punches === 1 && I3.guard && !I3.punch && I4.heavy;
+  console.assert(gOk, 'gesture decide broken', { I1, I2, punches, I3, I4 });
+  if (ok && gOk) console.log('self-check ok');
+}
+</script>
+</body>
+</html>
